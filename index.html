@@ -375,11 +375,48 @@ See something that shouldn't be here? Open the image and hit Report.</p>
     } else banner.classList.remove("on");
   }
 
-  function setCreator(id){
+  const BASE_TITLE = document.title;
+  const SLUG_RE = /^[a-z0-9]*-\d+$/;
+
+  function updateTitle(){
+    const c = state.creator && byCreator(state.creator);
+    document.title = c ? c.name + " – " + BASE_TITLE : BASE_TITLE;
+  }
+  function showCreator(id){
     state.creator = id; state.shown = 12;
     closeAll(); render();
     window.scrollTo({top:0});
+    updateTitle();
   }
+  // changes the address bar to /creatorname-12345/ (falls back to #creatorname-12345 where that is not allowed)
+  function pushUrl(slug){
+    const path = slug ? "/" + slug + "/" : "/";
+    try { if (location.pathname !== path) history.pushState({}, "", path); }
+    catch(e){ location.hash = slug ? "#" + slug : ""; }
+  }
+  function setCreator(id){
+    showCreator(id);
+    const c = byCreator(id);
+    pushUrl(c ? c.slug : "");
+  }
+  function routeSlug(){
+    const seg = (location.pathname.split("/").filter(Boolean).pop() || "").toLowerCase();
+    if (SLUG_RE.test(seg)) return seg;
+    const h = location.hash.replace(/^#\/?/, "").toLowerCase();
+    return SLUG_RE.test(h) ? h : "";
+  }
+  function applyRoute(initial){
+    const slug = routeSlug();
+    const c = slug && creators.find(x => x.slug === slug);
+    if (c) showCreator(c.id);
+    else {
+      if (state.creator){ state.creator = null; render(); }
+      if (slug && initial){ try { history.replaceState({}, "", "/"); } catch(e){} }   // unknown profile: go home
+      updateTitle();
+    }
+  }
+  window.addEventListener("popstate", () => applyRoute(false));
+  window.addEventListener("hashchange", () => applyRoute(false));
 
   // tag chips
   const chips = $("chips");
@@ -402,8 +439,8 @@ See something that shouldn't be here? Open the image and hit Report.</p>
     render();
   });
   $("more").onclick = () => { state.shown += 12; render(); };
-  $("b-clear").onclick = () => { state.creator = null; render(); };
-  $("home").onclick = e => { e.preventDefault(); state.q=""; state.tag=null; state.creator=null; state.shown=12; $("q").value=""; render(); window.scrollTo({top:0}); };
+  $("b-clear").onclick = () => { state.creator = null; render(); pushUrl(""); updateTitle(); };
+  $("home").onclick = e => { e.preventDefault(); state.q=""; state.tag=null; state.creator=null; state.shown=12; $("q").value=""; render(); window.scrollTo({top:0}); pushUrl(""); updateTitle(); };
 
   /* ---------- Overlays ---------- */
   let lastFocus = null, lbIndex = 0, lbPhoto = 0;
@@ -481,6 +518,19 @@ See something that shouldn't be here? Open the image and hit Report.</p>
   // If loading ever fails, use File > Share > Publish to web > CSV and paste that link here instead.
   const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1jF2BeRRw-FFvXB0X3au_fHWGCkbC0fRRBgt7CW0FcA0/gviz/tq?tqx=out:csv&headers=1";
 
+  // profile address: the name without spaces plus a number, e.g. estherolive-20317.
+  // The number is made from the name so it stays the same; add a "creator id" column to choose your own.
+  function makeSlug(name, forced, self){
+    const base = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, "") || "creator";
+    const taken = x => creators.some(c => c !== self && c.slug === x);
+    if (forced){ const f = base + "-" + forced; if (!taken(f)) return f; }
+    let h = 2166136261;
+    for (const ch of name.trim().toLowerCase()){ h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; }
+    let n = 10000 + (h % 90000), slug = base + "-" + n;
+    while (taken(slug)){ n = n === 99999 ? 10000 : n + 1; slug = base + "-" + n; }
+    return slug;
+  }
+
   function parseCSV(text){
     const rows = []; let row = [], f = "", q = false;
     for (let i = 0; i < text.length; i++){
@@ -525,7 +575,8 @@ See something that shouldn't be here? Open the image and hit Report.</p>
       ok: find("consentconfirmed","consent"),
       logo: find("logo","profilelogo","creatorlogo","profile","profileimage","profilepic","profilepicture","profilephoto","avatar","icon","pfp","dp"),
       bio: find("bio","about","description"),
-      likes: find("likes","views","popularity","popular")
+      likes: find("likes","views","popularity","popular"),
+      pid: find("creatorid","profileid","userid","uid","profilenumber")
     };
     if (ci.img < 0 || ci.creator < 0){
       toast("The sheet needs an 'image url' column and a 'name' column in row 1.");
@@ -541,14 +592,17 @@ See something that shouldn't be here? Open the image and hit Report.</p>
       let c = creators.find(x => x.name.toLowerCase() === name.toLowerCase());
       if (!c){
         let h = 0; for (const ch of name) h = (h*31 + ch.charCodeAt(0)) % 360;
-        c = {id:"s"+creators.length, name, hue:h, bio:"", logo:""};
+        c = {id:"s"+creators.length, name, hue:h, bio:"", logo:"", slug:""};
         creators.push(c);
+        c.slug = makeSlug(name);
       }
       // creator logo: first valid https link found on any of the creator's rows
       if (!c.logo && get("logo")){
         try { const u = new URL(get("logo").split(/[\s,|]+/)[0]); if (u.protocol === "https:") c.logo = u.href; } catch(e){}
       }
       if (get("bio")) c.bio = get("bio").slice(0, 300);
+      const pid = get("pid").replace(/\D/g, "").slice(0, 9);
+      if (pid && !c.fixedId){ c.slug = makeSlug(name, pid, c); c.fixedId = true; }
       // one cell can hold several image links (separated by a space, comma, "|" or a new line)
       const imgs = get("img").split(/[\s,|]+/).map(u => {
         try { const x = new URL(u); return x.protocol === "https:" ? x.href : null; } catch(e){ return null; }
@@ -577,7 +631,7 @@ See something that shouldn't be here? Open the image and hit Report.</p>
     items.push(...added);
     buildChips(); render();
   }
-  loadSheet();
+  loadSheet().then(() => applyRoute(true));
 
   /* ---------- Misc ---------- */
   let tt;
